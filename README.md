@@ -3,7 +3,12 @@ by AdaptiveMeteo S.r.l.
 
 ## 1. Install dependencies
 
+> conda env create -f env/cmcc_env_linux.yml
+or
+> conda env create -f env/cmcc_env_win.yml
+
 ## 2. Download data
+
 > python read_database.py
 
 **Options:**
