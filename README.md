@@ -1,1 +1,2 @@
-# cmcc_fire_detection
+# CMCC Fire Detection
+by AdaptiveMeteo S.r.l.
