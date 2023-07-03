@@ -96,7 +96,30 @@ def set_HDF5_coords(geoprojdir):
            print('Skipped HDF5 coord file ',f)
     return COORDS
 
+def resample_scene(scn):
+    """
+    Resampling coordinatines to get lon and lat
+    """
+    import pyresample
+    
+    width, height = scn['VIS006'].shape
+    area = pyresample.geometry.create_area_def( area_id='mygrid',projection={'proj': 'latlong', 'lon_0': 0},width=width, height=height)
+    scn = scn.resample(area)
+    for var in ['ndvi', 'cm']:
+        scn[var]['x']=scn['VIS008']['x'].values
+        scn[var]['y']=scn['VIS008']['y'].values
+        scn[var] = scn[var].rename({'y':'lat', 'x':'lon'})
+        scn[var]['lon'].attrs = {'units': 'degrees_east',
+                                 'standard_name': 'longitude'}
+        scn[var]['lat'].attrs = {'units': 'degrees_north',
+                                 'standard_name': 'latitude'}
+        
+    return scn
+
 def read_grb(filename,data_type,coords):
+    """
+        Deprecated function
+    """
     # extreme coords:
     # Latitudes
     N = +81
@@ -424,65 +447,109 @@ def read_HRIT(file, path):
     if not os.path.isfile(path + '/' + cloudmask):
            print(f"Missing Cloud Mask for file {file}")
            return False
-    with pygrib.open(path + '/' + cloudmask) as grbfile:
-          grbfile.seek(0)
-          grb = grbfile[1]
-          num_cm = grb.values
-          cm = np.zeros_like(num_cm,dtype=bool)
-          cm[ num_cm >= 2 ] = True
-          cm = xr.DataArray(cm,dims=('lon','lat'))
+       
     os.system(f"mkdir -p {outdir}/{date[:-4]}")
     related_segments = [  f for f in glob(path + '/' + header + '*' + date +'*') if f.split('-')[-4].strip('_') in channels]
     related_segments += [ path + '/' + file, path + '/' + epilogue]   
+
+    # Load Scene
     scn = Scene(filenames = related_segments, reader = 'seviri_l1b_hrit')
-    scn.load(channels)
-    scn.compute()
-    width, height = scn['VIS006'].shape
-    area = pyresample.geometry.create_area_def( area_id='mygrid',projection={'proj': 'latlong', 'lon_0': 0},width=width, height=height)
-    scn = scn.resample(area)
-    
-    # SHOW AND SAVE IMAGES
+    scn.load(channels, upper_right_corner='NE') 
 
-    HRIT_img(scn,'natural_color',date,True,outdir)
-    HRIT_img(scn,'cloudtop',date,True,outdir)
-    HRIT_img(scn,'convection',date,True,outdir)
-    HRIT_img(scn,'night_fog',date,True,outdir)
-    HRIT_img(scn,'snow',date,True,outdir)
-    HRIT_img(scn,'day_microphysics',date,True,outdir)
-    HRIT_img(scn,'fog',date,True,outdir)
-    HRIT_img(scn,'realistic_colors',date,True,outdir)
-    HRIT_img(scn,'overview',date,True,outdir)
-    HRIT_img(scn,"natural_enh",date,True,outdir)
-
-    outfile = f'{outdir}/{date[:-4]}/ndvi_{date}.png'    
+    # Compute NDVI
     scn['ndvi'] = (scn['VIS008'] - scn['VIS006'])/(scn['VIS006'] + scn['VIS008'])
-    if not os.path.isfile(outfile):
 
-        plt.imshow(scn['ndvi'][:-1:,:])
-        plt.title('NDVI '+date)
-        plt.colorbar()
-        plt.xticks([])
-        plt.yticks([])
+    # Load Cloud Mask Data as xarray Dataset using CFGrib
+    with xr.open_dataset(path + '/' + cloudmask, engine = 'cfgrib') as cm:
+        # Insert Cloud Mask Field inside Scene Dataset
+        scn['cm'] = scn['ndvi'].copy() # Copy ndvi structure
+        scn['cm'][:,:] = cm['p260537'].values.reshape((3712,3712))[::-1,::-1]
+
+    # Mask cloudy pixels
+    scn['cm']   = scn['cm'].where(scn['cm']>=2, drop=False)
+    
+    # Resample NDVI and CloudMask
+    scn = resample_scene(scn)
+    
+    outfile = f'{outdir}/{date[:-4]}/ndvi_{date}.png'    
+    if not os.path.isfile(outfile):
+        
+        # Plot NDVI with Cloud Mask
+        plt.clf()
+        scn['ndvi'].plot.imshow(cmap='Greens', vmin = 0)
+        scn['cm'].plot.imshow(cmap='Greys',vmin=1,add_colorbar=False)
+        plt.title('MASKED NDVI '+date)
         plt.savefig(outfile,dpi=300)
         print(datetime.now(),f'Saved NDVI image {outfile}')
-        plt.clf()
 
-    scn['ndvi'] = scn['ndvi'].rename( {'y': 'lat', 'x': 'lon'})
-    scn['ndvi'] = scn['ndvi'].where( ~ cm, drop=False)
-    scn['ndvi'] = scn['ndvi'].where( scn['ndvi'] >= 0.0, drop=False)
+        # plt.imshow(scn['ndvi'][:-1:,:])
+        # plt.title('NDVI '+date)
+        # plt.colorbar()
+        # plt.xticks([])
+        # plt.yticks([])
+        # plt.clf()
 
-    #scn['ndvi'] = scn['ndvi'].to_masked_array(copy=True)
-    scn['cm'] = cm
 
+    # Save Cloud Mask as boolean
+    scn['cm'] = scn['cm'].fillna(0)
+    scn['cm'] = scn['cm'].where(scn['cm'] < 2, 1)
+    scn['cm'] = scn['cm'].astype(bool)
+    
+    # Mask NDVI
+    scn['ndvi'] = scn['ndvi'].where(~ scn['cm'], drop=False)    
+
+    # Export NDVI and Cloud Mask
     ncfile =  f'{outdir}/{date[:-4]}/ndvi_{date}.nc'
-    if not os.path.isfile(ncfile):
+    if not os.path.isfile(ncfile):        
         scn.save_datasets(datasets=['ndvi','cm'],
                        filename=ncfile,
                        flatten_attrs=True,
                        exclude_attrs=['raw_metadata'],
                        include_lonlats=False)
         print(datetime.now(),f'Saved NetCDF file {ncfile}')
- 
+    
+    # SHOW AND SAVE IMAGES
+    try:
+        HRIT_img(scn,'natural_color',date,True,outdir)
+    except Exception as error:
+        print(datetime.now(),"Skipped Natural Color Image: ",error)
+    try:
+        HRIT_img(scn,'cloudtop',date,True,outdir)
+    except Exception as error:
+        print(datetime.now(),"Skipped Cloud Top Image: ",error)
+    try:
+        HRIT_img(scn,'convection',date,True,outdir)
+    except Exception as error:
+        print(datetime.now(),"Skipped Convection Image: ",error)
+    try:
+        HRIT_img(scn,'night_fog',date,True,outdir)
+    except Exception as error:
+        print(datetime.now(),"Skipped Night Fog Image: ",error)
+    try:
+       HRIT_img(scn,'snow',date,True,outdir)
+    except Exception as error:    
+        print(datetime.now(),"Skipped Snow Image: ",error)
+    try:
+       HRIT_img(scn,'day_microphysics',date,True,outdir)
+    except Exception as error:    
+        print(datetime.now(),"Skipped Day MicroPhysics Image: ",error)
+    try:
+       HRIT_img(scn,'fog',date,True,outdir)
+    except Exception as error:    
+        print(datetime.now(),"Skipped Fog Image: ",error)
+    try:
+        HRIT_img(scn,'realistic_colors',date,True,outdir)
+    except Exception as error:    
+        print(datetime.now(),"Skipped Realistic Colors Image: ",error)
+    try:
+        HRIT_img(scn,'overview',date,True,outdir)
+    except Exception as error:    
+        print(datetime.now(),"Skipped Overview Image: ",error)
+    try:
+        HRIT_img(scn,'natural_enh',date,True,outdir)
+    except Exception as error:    
+        print(datetime.now(),"Skipped Natural ENH Image: ",error)
+        
     return True
 
 def read_CAP(file, path, client):
