@@ -169,8 +169,8 @@ if __name__ == '__main__':
         args.end   = args.end.replace('T',' ')
         
     # Init InfluxDB client
-    client = DataFrameClient('elena.hopto.org',
-                             port     = 40022, 
+    client = DataFrameClient('192.168.100.22',
+                             port     = 8084, 
                              database = "Fire_Detection")
 
     # Send Query to DB
